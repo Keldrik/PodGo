@@ -19,48 +19,48 @@ import (
 type JsonFeeds []string
 
 type Podcast struct {
-	ID primitive.ObjectID `bson:"_id,omitempty"`
-	Title  string             `bson:"title,omitempty"`
-	Categories []string `bson:"categories,omitempty"`
-	Link string `bson:"link,omitempty"`
-	Description string `bson:"description,omitempty"`
-	Subtitle string `bson:"subtitle,omitempty"`
-	Owner PodcastOwner `bson:"owner,omitempty"`
-	Author string `bson:"author,omitempty"`
-	Image string `bson:"image,omitempty"`
-	Feed string `bson:"feed,omitempty"`
-	PodlistUrl string `bson:"podlistUrl,omitempty"`
-	Updated time.Time `bson:"updated,omitempty"`
+	ID          primitive.ObjectID `bson:"_id,omitempty"`
+	Title       string             `bson:"title,omitempty"`
+	Categories  []string           `bson:"categories,omitempty"`
+	Link        string             `bson:"link,omitempty"`
+	Description string             `bson:"description,omitempty"`
+	Subtitle    string             `bson:"subtitle,omitempty"`
+	Owner       PodcastOwner       `bson:"owner,omitempty"`
+	Author      string             `bson:"author,omitempty"`
+	Image       string             `bson:"image,omitempty"`
+	Feed        string             `bson:"feed,omitempty"`
+	PodlistUrl  string             `bson:"podlistUrl,omitempty"`
+	Updated     time.Time          `bson:"updated,omitempty"`
 }
 
 type Episode struct {
-	ID primitive.ObjectID `bson:"_id,omitempty"`
-	PodlistUrl string `bson:"podlistUrl,omitempty"`
-	PodcastId primitive.ObjectID `bson:"podcastId,omitempty"`
-	PodcastUrl string `bson:"podcastUrl,omitempty"`
-	PodcastTitle string `bson:"podcastTitle,omitempty"`
-	PodcastImage string `bson:"podcastImage,omitempty"`
-	Guid string `bson:"guid,omitempty"`
-	Title  string `bson:"title,omitempty"`
-	Published time.Time `bson:"published,omitempty"`
-	Duration string `bson:"Duration,omitempty"`
-	Summary string `bson:"summary,omitempty"`
-	Subtitle string `bson:"subtitle,omitempty"`
-	Description string `bson:"description,omitempty"`
-	Image string `bson:"image,omitempty"`
-	Content string `bson:"content,omitempty"`
-	Enclosure EpisodeEnclosure `bson:"enclosure,omitempty"`
+	ID           primitive.ObjectID `bson:"_id,omitempty"`
+	PodlistUrl   string             `bson:"podlistUrl,omitempty"`
+	PodcastId    primitive.ObjectID `bson:"podcastId,omitempty"`
+	PodcastUrl   string             `bson:"podcastUrl,omitempty"`
+	PodcastTitle string             `bson:"podcastTitle,omitempty"`
+	PodcastImage string             `bson:"podcastImage,omitempty"`
+	Guid         string             `bson:"guid,omitempty"`
+	Title        string             `bson:"title,omitempty"`
+	Published    time.Time          `bson:"published,omitempty"`
+	Duration     string             `bson:"Duration,omitempty"`
+	Summary      string             `bson:"summary,omitempty"`
+	Subtitle     string             `bson:"subtitle,omitempty"`
+	Description  string             `bson:"description,omitempty"`
+	Image        string             `bson:"image,omitempty"`
+	Content      string             `bson:"content,omitempty"`
+	Enclosure    EpisodeEnclosure   `bson:"enclosure,omitempty"`
 }
 
 type PodcastOwner struct {
-	Name string `bson:"name,omitempty"`
+	Name  string `bson:"name,omitempty"`
 	Email string `bson:"email,omitempty"`
 }
 
 type EpisodeEnclosure struct {
 	Filesize string `bson:"filesize,omitempty"`
 	Filetype string `bson:"filetype,omitempty"`
-	Url string `bson:"url,omitempty"`
+	Url      string `bson:"url,omitempty"`
 }
 
 func LoadFeed(url string, c chan *gofeed.Feed) {
@@ -94,10 +94,10 @@ func GetTitleUrl(title string, otherPodcasts []string, extra string) string {
 
 func TitleUrl(title string) string {
 	t := strings.ToLower(title)
-	t = strings.ReplaceAll(t,"ä", "ae")
-	t = strings.ReplaceAll(t,"ö", "oe")
-	t = strings.ReplaceAll(t,"ü", "ue")
-	t = strings.ReplaceAll(t,"ß", "ss")
+	t = strings.ReplaceAll(t, "ä", "ae")
+	t = strings.ReplaceAll(t, "ö", "oe")
+	t = strings.ReplaceAll(t, "ü", "ue")
+	t = strings.ReplaceAll(t, "ß", "ss")
 	var re = regexp.MustCompile(`[^a-zA-Z0-9 ]`)
 	t = re.ReplaceAllString(t, "")
 	var re2 = regexp.MustCompile(` +`)
@@ -125,9 +125,7 @@ func main() {
 	defer client.Disconnect(ctx)
 	database := client.Database("podgo")
 	podcastsCollection := database.Collection("podcasts")
-	podcastsCollection.Drop(ctx)
 	episodesCollection := database.Collection("episodes")
-	episodesCollection.Drop(ctx)
 
 	jsonFile, fileErr := os.Open("bak/feedbak.json")
 	if fileErr != nil {
@@ -158,7 +156,7 @@ func main() {
 	var podcastTitles []string
 
 	for i := 0; i < len(feeds); i++ {
-		f := <- cf
+		f := <-cf
 		if f != nil {
 			t := time.Now()
 			if f.PublishedParsed != nil {
@@ -169,17 +167,17 @@ func main() {
 				o = PodcastOwner{Name: f.ITunesExt.Owner.Name, Email: f.ITunesExt.Owner.Email}
 			}
 			podcast := Podcast{
-				Title:  f.Title,
-				Categories: f.Categories,
-				Link: f.Link,
+				Title:       f.Title,
+				Categories:  f.Categories,
+				Link:        f.Link,
 				Description: f.Description,
-				Subtitle: f.ITunesExt.Subtitle,
-				Owner: o,
-				Author: f.ITunesExt.Author,
-				Image: f.ITunesExt.Image,
-				Feed: f.FeedLink,
-				PodlistUrl: GetTitleUrl(f.Title, podcastTitles, ""),
-				Updated: t,
+				Subtitle:    f.ITunesExt.Subtitle,
+				Owner:       o,
+				Author:      f.ITunesExt.Author,
+				Image:       f.ITunesExt.Image,
+				Feed:        f.FeedLink,
+				PodlistUrl:  GetTitleUrl(f.Title, podcastTitles, ""),
+				Updated:     t,
 			}
 			podcasts = append(podcasts, podcast)
 			podcastTitles = append(podcastTitles, podcast.PodlistUrl)
@@ -197,24 +195,24 @@ func main() {
 					ee = EpisodeEnclosure{
 						Filetype: e.Enclosures[0].Type,
 						Filesize: e.Enclosures[0].Length,
-						Url: e.Enclosures[0].URL,
+						Url:      e.Enclosures[0].URL,
 					}
 				}
 				episode := Episode{
-					PodlistUrl: GetTitleUrl(e.Title, episodeTitles, ""),
-					PodcastUrl: podcast.PodlistUrl,
+					PodlistUrl:   GetTitleUrl(e.Title, episodeTitles, ""),
+					PodcastUrl:   podcast.PodlistUrl,
 					PodcastTitle: f.Title,
 					PodcastImage: f.ITunesExt.Image,
-					Guid: e.GUID,
-					Title: e.Title,
-					Published: et,
-					Duration: e.ITunesExt.Duration,
-					Summary: e.ITunesExt.Summary,
-					Subtitle: e.ITunesExt.Subtitle,
-					Description: e.Description,
-					Image: e.ITunesExt.Image,
-					Content: e.Content,
-					Enclosure: ee,
+					Guid:         e.GUID,
+					Title:        e.Title,
+					Published:    et,
+					Duration:     e.ITunesExt.Duration,
+					Summary:      e.ITunesExt.Summary,
+					Subtitle:     e.ITunesExt.Subtitle,
+					Description:  e.Description,
+					Image:        e.ITunesExt.Image,
+					Content:      e.Content,
+					Enclosure:    ee,
 				}
 				episodes = append(episodes, episode)
 				episodeTitles = append(episodeTitles, episode.PodlistUrl)
@@ -222,8 +220,10 @@ func main() {
 		}
 	}
 	fmt.Println("Writing to DB...")
+	podcastsCollection.Drop(ctx)
 	pInsertResult, _ := podcastsCollection.InsertMany(ctx, podcasts)
 	fmt.Println("Finished writing ", len(pInsertResult.InsertedIDs), "Podcasts!")
+	episodesCollection.Drop(ctx)
 	eInsertResult, _ := episodesCollection.InsertMany(ctx, episodes)
 	fmt.Println("Finished writing ", len(eInsertResult.InsertedIDs), "Episodes!")
 }
