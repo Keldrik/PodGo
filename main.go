@@ -147,7 +147,7 @@ func main() {
 	fmt.Println("")
 
 	cf := make(chan *gofeed.Feed)
-	for i := 0; i < 4; i++ {
+	for i := 0; i < len(feeds); i++ {
 		go LoadFeed(feeds[i], cf)
 	}
 
@@ -156,7 +156,7 @@ func main() {
 
 	var podcastTitles []string
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < len(feeds); i++ {
 		f := <-cf
 		if f != nil {
 			pTitleUrl := GetTitleUrl(f.Title, podcastTitles, "")
