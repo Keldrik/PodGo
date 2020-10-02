@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/mmcdole/gofeed"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -146,7 +147,7 @@ func main() {
 	fmt.Println("")
 
 	cf := make(chan *gofeed.Feed)
-	for i := 0; i < len(feeds); i++ {
+	for i := 0; i < 4; i++ {
 		go LoadFeed(feeds[i], cf)
 	}
 
@@ -155,75 +156,98 @@ func main() {
 
 	var podcastTitles []string
 
-	for i := 0; i < len(feeds); i++ {
+	for i := 0; i < 4; i++ {
 		f := <-cf
 		if f != nil {
-			t := time.Now()
-			if f.PublishedParsed != nil {
-				t = *f.PublishedParsed
+			pTitleUrl := GetTitleUrl(f.Title, podcastTitles, "")
+			pc, _ := podcastsCollection.CountDocuments(ctx, bson.M{"podlistUrl": pTitleUrl})
+			if pc > 0 {
+				fmt.Println("Podcast already exists... " + pTitleUrl)
+			} else {
+				fmt.Println("New Podcast... " + pTitleUrl)
+				t := time.Now()
+				if f.PublishedParsed != nil {
+					t = *f.PublishedParsed
+				}
+				var o PodcastOwner
+				if f.ITunesExt.Owner != nil {
+					o = PodcastOwner{Name: f.ITunesExt.Owner.Name, Email: f.ITunesExt.Owner.Email}
+				}
+				podcast := Podcast{
+					Title:       f.Title,
+					Categories:  f.Categories,
+					Link:        f.Link,
+					Description: f.Description,
+					Subtitle:    f.ITunesExt.Subtitle,
+					Owner:       o,
+					Author:      f.ITunesExt.Author,
+					Image:       f.ITunesExt.Image,
+					Feed:        f.FeedLink,
+					PodlistUrl:  pTitleUrl,
+					Updated:     t,
+				}
+				podcasts = append(podcasts, podcast)
+				podcastTitles = append(podcastTitles, podcast.PodlistUrl)
 			}
-			var o PodcastOwner
-			if f.ITunesExt.Owner != nil {
-				o = PodcastOwner{Name: f.ITunesExt.Owner.Name, Email: f.ITunesExt.Owner.Email}
-			}
-			podcast := Podcast{
-				Title:       f.Title,
-				Categories:  f.Categories,
-				Link:        f.Link,
-				Description: f.Description,
-				Subtitle:    f.ITunesExt.Subtitle,
-				Owner:       o,
-				Author:      f.ITunesExt.Author,
-				Image:       f.ITunesExt.Image,
-				Feed:        f.FeedLink,
-				PodlistUrl:  GetTitleUrl(f.Title, podcastTitles, ""),
-				Updated:     t,
-			}
-			podcasts = append(podcasts, podcast)
-			podcastTitles = append(podcastTitles, podcast.PodlistUrl)
+			var dbEpisodes []Episode
+			ec, _ := episodesCollection.Find(ctx, bson.M{"podcastUrl": pTitleUrl})
+			ec.All(ctx, &dbEpisodes)
 			var episodeTitles []string
+			for _, dbe := range dbEpisodes {
+				episodeTitles = append(episodeTitles, dbe.Title)
+			}
 			for _, e := range f.Items {
-				if e.ITunesExt == nil {
-					break
-				}
-				et := time.Now()
-				if e.PublishedParsed != nil {
-					et = *e.PublishedParsed
-				}
-				var ee EpisodeEnclosure
-				if e.Enclosures != nil && len(e.Enclosures) > 0 {
-					ee = EpisodeEnclosure{
-						Filetype: e.Enclosures[0].Type,
-						Filesize: e.Enclosures[0].Length,
-						Url:      e.Enclosures[0].URL,
+				if e.ITunesExt != nil && isNew(dbEpisodes, e.GUID) {
+					et := time.Now()
+					if e.PublishedParsed != nil {
+						et = *e.PublishedParsed
 					}
+					var ee EpisodeEnclosure
+					if e.Enclosures != nil && len(e.Enclosures) > 0 {
+						ee = EpisodeEnclosure{
+							Filetype: e.Enclosures[0].Type,
+							Filesize: e.Enclosures[0].Length,
+							Url:      e.Enclosures[0].URL,
+						}
+					}
+					episode := Episode{
+						PodlistUrl:   GetTitleUrl(e.Title, episodeTitles, ""),
+						PodcastUrl:   pTitleUrl,
+						PodcastTitle: f.Title,
+						PodcastImage: f.ITunesExt.Image,
+						Guid:         e.GUID,
+						Title:        e.Title,
+						Published:    et,
+						Duration:     e.ITunesExt.Duration,
+						Summary:      e.ITunesExt.Summary,
+						Subtitle:     e.ITunesExt.Subtitle,
+						Description:  e.Description,
+						Image:        e.ITunesExt.Image,
+						Content:      e.Content,
+						Enclosure:    ee,
+					}
+					episodes = append(episodes, episode)
+					episodeTitles = append(episodeTitles, episode.PodlistUrl)
 				}
-				episode := Episode{
-					PodlistUrl:   GetTitleUrl(e.Title, episodeTitles, ""),
-					PodcastUrl:   podcast.PodlistUrl,
-					PodcastTitle: f.Title,
-					PodcastImage: f.ITunesExt.Image,
-					Guid:         e.GUID,
-					Title:        e.Title,
-					Published:    et,
-					Duration:     e.ITunesExt.Duration,
-					Summary:      e.ITunesExt.Summary,
-					Subtitle:     e.ITunesExt.Subtitle,
-					Description:  e.Description,
-					Image:        e.ITunesExt.Image,
-					Content:      e.Content,
-					Enclosure:    ee,
-				}
-				episodes = append(episodes, episode)
-				episodeTitles = append(episodeTitles, episode.PodlistUrl)
 			}
 		}
 	}
 	fmt.Println("Writing to DB...")
-	podcastsCollection.Drop(ctx)
-	pInsertResult, _ := podcastsCollection.InsertMany(ctx, podcasts)
-	fmt.Println("Finished writing ", len(pInsertResult.InsertedIDs), "Podcasts!")
-	episodesCollection.Drop(ctx)
-	eInsertResult, _ := episodesCollection.InsertMany(ctx, episodes)
-	fmt.Println("Finished writing ", len(eInsertResult.InsertedIDs), "Episodes!")
+	if len(podcasts) > 0 {
+		pInsertResult, _ := podcastsCollection.InsertMany(ctx, podcasts)
+		fmt.Println("Finished writing ", len(pInsertResult.InsertedIDs), "Podcasts!")
+	}
+	if len(episodes) > 0 {
+		eInsertResult, _ := episodesCollection.InsertMany(ctx, episodes)
+		fmt.Println("Finished writing ", len(eInsertResult.InsertedIDs), "Episodes!")
+	}
+}
+
+func isNew(el []Episode, guid string) bool {
+	for _, e := range el {
+		if e.Guid == guid {
+			return false
+		}
+	}
+	return true
 }
