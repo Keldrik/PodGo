@@ -158,7 +158,7 @@ func main() {
 
 	for i := 0; i < len(feeds); i++ {
 		f := <-cf
-		if f != nil {
+		if f != nil && f.ITunesExt != nil {
 			pTitleUrl := GetTitleUrl(f.Title, podcastTitles, "")
 			pc, _ := podcastsCollection.CountDocuments(ctx, bson.M{"podlistUrl": pTitleUrl})
 			if pc > 0 {
