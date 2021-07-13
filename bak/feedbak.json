@@ -5,7 +5,6 @@
   "http://feeds.feedburner.com/wochennotizen",
   "http://feeds.feedburner.com/kreuzfahrt-podcast?format=xml",
   "http://www.bitsundso.de/feed/",
-  "http://panzerknacker.libsyn.com/rss",
   "http://erfolg.libsyn.com/rss",
   "http://hashtagreallife.de/feed/mp3/",
   "http://feeds.feedburner.com/EinschlafenPodcast",
@@ -188,5 +187,7 @@
   "https://kanackischewelle.podigee.io/feed/mp3",
   "https://matatupodcast.podigee.io/feed/mp3",
   "https://riceandshine.podigee.io/feed/mp3",
-  "https://china.podigee.io/feed/mp3"
+  "https://china.podigee.io/feed/mp3",
+  "https://gefuehltefakten.podigee.io/feed/mp3",
+  "https://neuemusikleben.podigee.io/feed/mp3"
 ]
