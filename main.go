@@ -4,17 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"log"
+	"net/url"
+	"os"
+	"regexp"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/mmcdole/gofeed"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"io/ioutil"
-	"net/url"
-	"os"
-	"regexp"
-	"strings"
-	"time"
 )
 
 type JsonFeeds []string
@@ -64,190 +68,352 @@ type EpisodeEnclosure struct {
 	Url      string `bson:"url,omitempty"`
 }
 
-func LoadFeed(url string, c chan *gofeed.Feed) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+const (
+	mongoURI          = "mongodb://localhost" // Consider moving this to an environment variable
+	dbName            = "podgo"
+	podcastCollection = "podcasts"
+	episodeCollection = "episodes"
+	maxConcurrent     = 10 // Limit concurrent operations
+)
+
+func LoadFeed(ctx context.Context, url string) (*gofeed.Feed, error) {
 	fp := gofeed.NewParser()
 	feed, err := fp.ParseURLWithContext(url, ctx)
-	if err == nil {
-		if len(feed.FeedLink) <= 0 {
-			feed.FeedLink = url
-		}
-		fmt.Println("Feed Loaded: ", url)
-		fmt.Println("")
-		c <- feed
-	} else {
-		fmt.Println("Feed Error: ", url)
-		fmt.Println(err)
-		fmt.Println("")
-		c <- nil
+	if err != nil {
+		return nil, fmt.Errorf("feed error: %v", err)
 	}
+	if len(feed.FeedLink) <= 0 {
+		feed.FeedLink = url
+	}
+	log.Printf("Feed Loaded: %s\n", url)
+	return feed, nil
 }
 
-func GetTitleUrl(title string, otherPodcasts []string, extra string) string {
-	t := title + extra
-	t = TitleUrl(t)
-	if TitleExist(otherPodcasts, t) {
-		t = GetTitleUrl(t, otherPodcasts, "x")
+func GetTitleUrl(title string, otherPodcasts map[string]bool) string {
+	t := TitleUrl(title)
+	for otherPodcasts[t] {
+		t += "x"
 	}
 	return t
 }
 
 func TitleUrl(title string) string {
 	t := strings.ToLower(title)
-	t = strings.ReplaceAll(t, "ä", "ae")
-	t = strings.ReplaceAll(t, "ö", "oe")
-	t = strings.ReplaceAll(t, "ü", "ue")
-	t = strings.ReplaceAll(t, "ß", "ss")
-	var re = regexp.MustCompile(`[^a-zA-Z0-9 ]`)
+	t = strings.NewReplacer("ä", "ae", "ö", "oe", "ü", "ue", "ß", "ss").Replace(t)
+	re := regexp.MustCompile(`[^a-zA-Z0-9 ]`)
 	t = re.ReplaceAllString(t, "")
-	var re2 = regexp.MustCompile(` +`)
-	t = re2.ReplaceAllString(t, "-")
-	var re3 = regexp.MustCompile(`-{2,10}`)
-	t = re3.ReplaceAllString(t, "-")
+	t = regexp.MustCompile(` +`).ReplaceAllString(t, "-")
+	t = regexp.MustCompile(`-{2,10}`).ReplaceAllString(t, "-")
 	return url.PathEscape(t)
 }
 
-func TitleExist(arr []string, str string) bool {
-	for _, a := range arr {
-		if a == str {
-			return true
+func processFeed(ctx context.Context, feed *gofeed.Feed, podcastsCollection, episodesCollection *mongo.Collection, existingPodcastFeeds map[string]bool, podcastTitles map[string]bool) error {
+	pTitleUrl := GetTitleUrl(feed.Title, podcastTitles)
+
+	var podcast Podcast
+	if existingPodcastFeeds[feed.FeedLink] {
+		log.Printf("Updating existing podcast... %s\n", pTitleUrl)
+		err := podcastsCollection.FindOne(ctx, bson.M{"feed": feed.FeedLink}).Decode(&podcast)
+		if err != nil {
+			return fmt.Errorf("error fetching existing podcast: %v", err)
+		}
+		// Update podcast info if needed
+		updatePodcast(ctx, &podcast, feed, podcastsCollection)
+	} else {
+		log.Printf("Creating new podcast... %s\n", pTitleUrl)
+		podcast = createNewPodcast(feed, pTitleUrl)
+		_, err := podcastsCollection.InsertOne(ctx, podcast)
+		if err != nil {
+			return fmt.Errorf("error inserting podcast: %v", err)
+		}
+		existingPodcastFeeds[feed.FeedLink] = true
+		podcastTitles[pTitleUrl] = true
+	}
+
+	// Process episodes
+	err := processEpisodes(ctx, feed, podcast, episodesCollection)
+	if err != nil {
+		return fmt.Errorf("error processing episodes: %v", err)
+	}
+
+	return nil
+}
+
+func createNewPodcast(feed *gofeed.Feed, pTitleUrl string) Podcast {
+	t := time.Now()
+	if feed.PublishedParsed != nil {
+		t = *feed.PublishedParsed
+	}
+
+	var o PodcastOwner
+	var subtitle, author, image string
+	if feed.ITunesExt != nil {
+		if feed.ITunesExt.Owner != nil {
+			o = PodcastOwner{Name: feed.ITunesExt.Owner.Name, Email: feed.ITunesExt.Owner.Email}
+		}
+		subtitle = feed.ITunesExt.Subtitle
+		author = feed.ITunesExt.Author
+		image = feed.ITunesExt.Image
+	}
+
+	return Podcast{
+		Title:       feed.Title,
+		Categories:  feed.Categories,
+		Link:        feed.Link,
+		Description: feed.Description,
+		Subtitle:    subtitle,
+		Owner:       o,
+		Author:      author,
+		Image:       image,
+		Feed:        feed.FeedLink,
+		PodlistUrl:  pTitleUrl,
+		Updated:     t,
+	}
+}
+
+func updatePodcast(ctx context.Context, podcast *Podcast, feed *gofeed.Feed, podcastsCollection *mongo.Collection) {
+	// Update fields that might have changed
+	update := bson.M{
+		"$set": bson.M{
+			"categories":  feed.Categories,
+			"link":        feed.Link,
+			"description": feed.Description,
+			"updated":     time.Now(),
+		},
+	}
+
+	if feed.ITunesExt != nil {
+		update["$set"].(bson.M)["subtitle"] = feed.ITunesExt.Subtitle
+		update["$set"].(bson.M)["author"] = feed.ITunesExt.Author
+		update["$set"].(bson.M)["image"] = feed.ITunesExt.Image
+	}
+
+	_, err := podcastsCollection.UpdateOne(ctx, bson.M{"_id": podcast.ID}, update)
+	if err != nil {
+		log.Printf("Error updating podcast %s: %v\n", podcast.Title, err)
+	}
+}
+
+func processEpisodes(ctx context.Context, feed *gofeed.Feed, podcast Podcast, episodesCollection *mongo.Collection) error {
+	existingEpisodes := make(map[string]bool)
+	cursor, err := episodesCollection.Find(ctx, bson.M{"podcastUrl": podcast.PodlistUrl})
+	if err != nil {
+		return fmt.Errorf("error fetching existing episodes: %v", err)
+	}
+	var episodes []Episode
+	if err := cursor.All(ctx, &episodes); err != nil {
+		return fmt.Errorf("error decoding existing episodes: %v", err)
+	}
+	for _, e := range episodes {
+		existingEpisodes[e.Guid] = true
+	}
+
+	var newEpisodes []interface{}
+	for _, e := range feed.Items {
+		if e.ITunesExt != nil {
+			if !existingEpisodes[e.GUID] {
+				episode := createEpisode(e, podcast)
+				newEpisodes = append(newEpisodes, episode)
+			}
 		}
 	}
-	return false
+
+	if len(newEpisodes) > 0 {
+		var operations []mongo.WriteModel
+		for _, episode := range newEpisodes {
+			operations = append(operations, mongo.NewInsertOneModel().SetDocument(episode))
+		}
+
+		_, err = episodesCollection.BulkWrite(ctx, operations)
+		if err != nil {
+			return fmt.Errorf("error inserting new episodes: %v", err)
+		}
+		log.Printf("Inserted %d new episodes for podcast %s\n", len(newEpisodes), podcast.Title)
+	} else {
+		log.Printf("No new episodes for podcast %s\n", podcast.Title)
+	}
+
+	return nil
+}
+
+func createEpisode(e *gofeed.Item, podcast Podcast) Episode {
+	et := time.Now()
+	if e.PublishedParsed != nil {
+		et = *e.PublishedParsed
+	}
+	var ee EpisodeEnclosure
+	if e.Enclosures != nil && len(e.Enclosures) > 0 {
+		ee = EpisodeEnclosure{
+			Filetype: e.Enclosures[0].Type,
+			Filesize: e.Enclosures[0].Length,
+			Url:      e.Enclosures[0].URL,
+		}
+	}
+
+	var duration, summary, subtitle, image string
+	if e.ITunesExt != nil {
+		duration = e.ITunesExt.Duration
+		summary = e.ITunesExt.Summary
+		subtitle = e.ITunesExt.Subtitle
+		image = e.ITunesExt.Image
+	}
+
+	return Episode{
+		PodlistUrl:   GetTitleUrl(e.Title, make(map[string]bool)),
+		PodcastUrl:   podcast.PodlistUrl,
+		PodcastTitle: podcast.Title,
+		PodcastImage: podcast.Image,
+		Guid:         e.GUID,
+		Title:        e.Title,
+		Published:    et,
+		Duration:     duration,
+		Summary:      summary,
+		Subtitle:     subtitle,
+		Description:  e.Description,
+		Image:        image,
+		Content:      e.Content,
+		Enclosure:    ee,
+	}
 }
 
 func main() {
-	ctx, _ := context.WithTimeout(context.Background(), 600*time.Second)
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost"))
-	if err != nil {
-		panic(err)
-	}
-	defer client.Disconnect(ctx)
-	database := client.Database("podgo")
-	podcastsCollection := database.Collection("podcasts")
-	episodesCollection := database.Collection("episodes")
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
 
-	jsonFile, fileErr := os.Open("bak/feedbak.json")
-	if fileErr != nil {
-		fmt.Println(fileErr)
-		return
+	client := connectToMongoDB(ctx)
+	defer client.Disconnect(ctx)
+
+	database := client.Database(dbName)
+	podcastsCollection := database.Collection(podcastCollection)
+	episodesCollection := database.Collection(episodeCollection)
+
+	createIndexes(ctx, podcastsCollection, episodesCollection)
+
+	feeds := loadFeedsFromJSON("bak/feedbak.json")
+	log.Printf("%d Podcast Feeds loaded from JSON File!\n", len(feeds))
+
+	existingPodcastFeeds, podcastTitles := loadExistingPodcasts(ctx, podcastsCollection)
+
+	processFeedsInBatches(ctx, feeds, podcastsCollection, episodesCollection, existingPodcastFeeds, podcastTitles)
+
+	log.Println("All feeds processed!")
+}
+
+func connectToMongoDB(ctx context.Context) *mongo.Client {
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
+	if err != nil {
+		log.Fatalf("Failed to create MongoDB client: %v", err)
+	}
+
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		log.Fatalf("Failed to connect to MongoDB server: %v", err)
+	}
+
+	log.Println("Successfully connected to MongoDB")
+	return client
+}
+
+func createIndexes(ctx context.Context, podcastsCollection, episodesCollection *mongo.Collection) {
+	_, err := podcastsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "podlistUrl", Value: 1}},
+	})
+	if err != nil {
+		log.Printf("Error creating index on podcasts collection: %v\n", err)
+	}
+
+	_, err = episodesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "podcastUrl", Value: 1}},
+	})
+	if err != nil {
+		log.Printf("Error creating index on episodes collection: %v\n", err)
+	}
+}
+
+func loadFeedsFromJSON(filename string) []string {
+	jsonFile, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("Failed to open JSON file: %v", err)
 	}
 	defer jsonFile.Close()
 
 	byteValue, _ := ioutil.ReadAll(jsonFile)
-	var feeds JsonFeeds
-	jsonErr := json.Unmarshal(byteValue, &feeds)
-	if jsonErr != nil {
-		fmt.Println(jsonErr)
-		return
-	}
-	fmt.Println(len(feeds), " Podcast Feeds loaded from Json File!")
-	fmt.Println("----------------------------------------")
-	fmt.Println("")
-
-	cf := make(chan *gofeed.Feed)
-	for i := 0; i < len(feeds); i++ {
-		go LoadFeed(feeds[i], cf)
+	var feeds []string
+	if err := json.Unmarshal(byteValue, &feeds); err != nil {
+		log.Fatalf("Failed to unmarshal JSON: %v", err)
 	}
 
-	var podcasts []interface{}
-	var episodes []interface{}
+	return feeds
+}
 
-	var podcastTitles []string
+func loadExistingPodcasts(ctx context.Context, podcastsCollection *mongo.Collection) (map[string]bool, map[string]bool) {
+	existingPodcastFeeds := make(map[string]bool)
+	podcastTitles := make(map[string]bool)
 
-	for i := 0; i < len(feeds); i++ {
-		f := <-cf
-		if f != nil && f.ITunesExt != nil {
-			pTitleUrl := GetTitleUrl(f.Title, podcastTitles, "")
-			pc, _ := podcastsCollection.CountDocuments(ctx, bson.M{"podlistUrl": pTitleUrl})
-			if pc > 0 {
-				fmt.Println("Podcast already exists... " + pTitleUrl)
-			} else {
-				fmt.Println("New Podcast... " + pTitleUrl)
-				t := time.Now()
-				if f.PublishedParsed != nil {
-					t = *f.PublishedParsed
-				}
-				var o PodcastOwner
-				if f.ITunesExt.Owner != nil {
-					o = PodcastOwner{Name: f.ITunesExt.Owner.Name, Email: f.ITunesExt.Owner.Email}
-				}
-				podcast := Podcast{
-					Title:       f.Title,
-					Categories:  f.Categories,
-					Link:        f.Link,
-					Description: f.Description,
-					Subtitle:    f.ITunesExt.Subtitle,
-					Owner:       o,
-					Author:      f.ITunesExt.Author,
-					Image:       f.ITunesExt.Image,
-					Feed:        f.FeedLink,
-					PodlistUrl:  pTitleUrl,
-					Updated:     t,
-				}
-				podcasts = append(podcasts, podcast)
-				podcastTitles = append(podcastTitles, podcast.PodlistUrl)
-			}
-			var dbEpisodes []Episode
-			ec, _ := episodesCollection.Find(ctx, bson.M{"podcastUrl": pTitleUrl})
-			ec.All(ctx, &dbEpisodes)
-			var episodeTitles []string
-			for _, dbe := range dbEpisodes {
-				episodeTitles = append(episodeTitles, dbe.Title)
-			}
-			for _, e := range f.Items {
-				if e.ITunesExt != nil && isNew(dbEpisodes, e.GUID) {
-					et := time.Now()
-					if e.PublishedParsed != nil {
-						et = *e.PublishedParsed
-					}
-					var ee EpisodeEnclosure
-					if e.Enclosures != nil && len(e.Enclosures) > 0 {
-						ee = EpisodeEnclosure{
-							Filetype: e.Enclosures[0].Type,
-							Filesize: e.Enclosures[0].Length,
-							Url:      e.Enclosures[0].URL,
-						}
-					}
-					episode := Episode{
-						PodlistUrl:   GetTitleUrl(e.Title, episodeTitles, ""),
-						PodcastUrl:   pTitleUrl,
-						PodcastTitle: f.Title,
-						PodcastImage: f.ITunesExt.Image,
-						Guid:         e.GUID,
-						Title:        e.Title,
-						Published:    et,
-						Duration:     e.ITunesExt.Duration,
-						Summary:      e.ITunesExt.Summary,
-						Subtitle:     e.ITunesExt.Subtitle,
-						Description:  e.Description,
-						Image:        e.ITunesExt.Image,
-						Content:      e.Content,
-						Enclosure:    ee,
-					}
-					episodes = append(episodes, episode)
-					episodeTitles = append(episodeTitles, episode.PodlistUrl)
-				}
-			}
+	cursor, err := podcastsCollection.Find(ctx, bson.M{})
+	if err != nil {
+		log.Fatalf("Failed to fetch existing podcasts: %v", err)
+	}
+
+	var podcasts []Podcast
+	if err := cursor.All(ctx, &podcasts); err != nil {
+		log.Fatalf("Failed to decode existing podcasts: %v", err)
+	}
+
+	for _, p := range podcasts {
+		existingPodcastFeeds[p.Feed] = true
+		podcastTitles[p.PodlistUrl] = true
+	}
+
+	return existingPodcastFeeds, podcastTitles
+}
+
+func processFeedsInBatches(ctx context.Context, feeds []string, podcastsCollection, episodesCollection *mongo.Collection, existingPodcastFeeds, podcastTitles map[string]bool) {
+	batchSize := 10 // Process 10 feeds at a time
+	for i := 0; i < len(feeds); i += batchSize {
+		end := i + batchSize
+		if end > len(feeds) {
+			end = len(feeds)
 		}
-	}
-	fmt.Println("Writing to DB...")
-	if len(podcasts) > 0 {
-		pInsertResult, _ := podcastsCollection.InsertMany(ctx, podcasts)
-		fmt.Println("Finished writing ", len(pInsertResult.InsertedIDs), "Podcasts!")
-	}
-	if len(episodes) > 0 {
-		eInsertResult, _ := episodesCollection.InsertMany(ctx, episodes)
-		fmt.Println("Finished writing ", len(eInsertResult.InsertedIDs), "Episodes!")
+
+		processBatch(ctx, feeds[i:end], podcastsCollection, episodesCollection, existingPodcastFeeds, podcastTitles)
+
+		log.Printf("Processed batch %d to %d\n", i, end-1)
+		time.Sleep(5 * time.Second) // Sleep between batches to allow system to recover
 	}
 }
 
-func isNew(el []Episode, guid string) bool {
-	for _, e := range el {
-		if e.Guid == guid {
-			return false
-		}
+func processBatch(ctx context.Context, feeds []string, podcastsCollection, episodesCollection *mongo.Collection, existingPodcastFeeds, podcastTitles map[string]bool) {
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 3) // Reduce max concurrent operations
+
+	for _, feedURL := range feeds {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			processFeedURL(ctx, url, podcastsCollection, episodesCollection, existingPodcastFeeds, podcastTitles)
+		}(feedURL)
 	}
-	return true
+
+	wg.Wait()
+}
+
+func processFeedURL(ctx context.Context, url string, podcastsCollection, episodesCollection *mongo.Collection, existingPodcastFeeds, podcastTitles map[string]bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	feed, err := LoadFeed(ctx, url)
+	if err != nil {
+		log.Printf("Error loading feed %s: %v\n", url, err)
+		return
+	}
+
+	if err := processFeed(ctx, feed, podcastsCollection, episodesCollection, existingPodcastFeeds, podcastTitles); err != nil {
+		log.Printf("Error processing feed %s: %v\n", url, err)
+	}
+
+	runtime.GC() // Force garbage collection after processing each feed
 }
