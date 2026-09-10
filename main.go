@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -20,8 +20,6 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
-
-type JsonFeeds []string
 
 type Podcast struct {
 	ID          primitive.ObjectID `bson:"_id,omitempty"`
@@ -69,11 +67,10 @@ type EpisodeEnclosure struct {
 }
 
 const (
-	mongoURI          = "mongodb://localhost" // Consider moving this to an environment variable
+	mongoURI          = "mongodb://localhost"
 	dbName            = "podgo"
 	podcastCollection = "podcasts"
 	episodeCollection = "episodes"
-	maxConcurrent     = 10 // Limit concurrent operations
 )
 
 func LoadFeed(ctx context.Context, url string) (*gofeed.Feed, error) {
@@ -281,7 +278,13 @@ func main() {
 	defer cancel()
 
 	client := connectToMongoDB(ctx)
-	defer client.Disconnect(ctx)
+
+	defer func(client *mongo.Client, ctx context.Context) {
+		err := client.Disconnect(ctx)
+		if err != nil {
+			log.Printf("Error disconnecting mongo client: %v\n", err)
+		}
+	}(client, ctx)
 
 	database := client.Database(dbName)
 	podcastsCollection := database.Collection(podcastCollection)
@@ -335,9 +338,15 @@ func loadFeedsFromJSON(filename string) []string {
 	if err != nil {
 		log.Fatalf("Failed to open JSON file: %v", err)
 	}
-	defer jsonFile.Close()
 
-	byteValue, _ := ioutil.ReadAll(jsonFile)
+	defer func(jsonFile *os.File) {
+		err := jsonFile.Close()
+		if err != nil {
+			log.Printf("Error closing JSON file: %v", err)
+		}
+	}(jsonFile)
+
+	byteValue, _ := io.ReadAll(jsonFile)
 	var feeds []string
 	if err := json.Unmarshal(byteValue, &feeds); err != nil {
 		log.Fatalf("Failed to unmarshal JSON: %v", err)
